@@ -146,7 +146,9 @@ class ClobWsClient:
             while True:
                 await asyncio.sleep(_APP_PING_INTERVAL_S)
                 await ws.send("PING")
-        except (asyncio.CancelledError, Exception):
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - ping failure handled by reconnect
             return
 
     async def _read_loop(self, ws) -> None:

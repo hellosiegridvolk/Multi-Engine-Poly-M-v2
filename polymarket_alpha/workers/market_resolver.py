@@ -85,8 +85,11 @@ async def _missing_condition_ids(conn: aiosqlite.Connection) -> list[str]:
     )
     cids = {r[0] for r in await cur.fetchall()}
     # WS raw rows carry the conditionId inside the payload (`market`).
+    # Bounded scan: newest unpromoted first, capped per cycle.
     cur = await conn.execute(
-        "SELECT payload_json FROM ws_trades_raw WHERE promoted_activity_id IS NULL"
+        "SELECT payload_json FROM ws_trades_raw WHERE promoted_activity_id "
+        "IS NULL ORDER BY raw_id DESC LIMIT ?",
+        (MAX_IDS_PER_CYCLE * 4,),
     )
     known = await markets_repo.known_condition_ids(conn)
     for (pj,) in await cur.fetchall():

@@ -138,13 +138,22 @@ class GammaClient:
         return result
 
     def _iter_raw_markets(
-        self, token_ids: Sequence[str], *, batch_size: int = 50
+        self,
+        values: Sequence[str],
+        *,
+        param: str = "clob_token_ids",
+        batch_size: int = 50,
     ):
-        """Yield raw market dicts (open + closed merged, include_tag)."""
-        unique = [t for t in dict.fromkeys(token_ids) if t]
+        """Yield raw market dicts (open + closed merged, include_tag).
+
+        `param` is the Gamma filter key: ``clob_token_ids`` (token ids) or
+        ``condition_ids`` (condition ids — recovers delisted/closed markets
+        that the token filter misses).
+        """
+        unique = [t for t in dict.fromkeys(values) if t]
         for start in range(0, len(unique), batch_size):
             chunk = unique[start : start + batch_size]
-            base = [("clob_token_ids", t) for t in chunk]
+            base = [(param, t) for t in chunk]
             base += [("include_tag", "true"), ("limit", "100")]
             for closed in (None, "true"):
                 params = list(base)
@@ -157,6 +166,41 @@ class GammaClient:
                     continue
                 yield from payload
 
+    @staticmethod
+    def _with_tags(rec: dict, crypto_tag_id: str | None):
+        market = _parse_market(rec, crypto_tag_id=crypto_tag_id)
+        if not (market and market.condition_id):
+            return None
+        tags = rec.get("tags")
+        slugs = (
+            [
+                str(t.get("slug"))
+                for t in tags
+                if isinstance(t, dict) and t.get("slug")
+            ]
+            if isinstance(tags, list)
+            else []
+        )
+        return market, slugs
+
+    def fetch_markets_with_tags_by_condition(
+        self,
+        condition_ids: Sequence[str],
+        *,
+        crypto_tag_id: str | None = None,
+        batch_size: int = 25,
+    ) -> dict[str, tuple[Market, list[str]]]:
+        """Resolve by condition id (recovers historical/closed markets the
+        clob_token_ids filter cannot)."""
+        result: dict[str, tuple[Market, list[str]]] = {}
+        for rec in self._iter_raw_markets(
+            condition_ids, param="condition_ids", batch_size=batch_size
+        ):
+            mt = self._with_tags(rec, crypto_tag_id)
+            if mt:
+                result[mt[0].condition_id] = mt
+        return result
+
     def fetch_markets_with_tags(
         self,
         token_ids: Sequence[str],
@@ -168,14 +212,7 @@ class GammaClient:
         market's tag slug list (single fetch, no extra HTTP)."""
         result: dict[str, tuple[Market, list[str]]] = {}
         for rec in self._iter_raw_markets(token_ids, batch_size=batch_size):
-            market = _parse_market(rec, crypto_tag_id=crypto_tag_id)
-            if not (market and market.condition_id):
-                continue
-            tags = rec.get("tags")
-            slugs = (
-                [str(t.get("slug")) for t in tags if isinstance(t, dict) and t.get("slug")]
-                if isinstance(tags, list)
-                else []
-            )
-            result[market.condition_id] = (market, slugs)
+            mt = self._with_tags(rec, crypto_tag_id)
+            if mt:
+                result[mt[0].condition_id] = mt
         return result

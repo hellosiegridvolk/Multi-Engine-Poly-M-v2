@@ -159,11 +159,16 @@ computed from the **raw** price first, then quantized down
   chunks with **per-chunk error isolation** (a flaky batch is logged and
   skipped, never aborting the whole cycle) and a per-cycle token cap so
   progress is incremental and bounded.
-- **`clob_token_ids` only resolves markets Gamma currently serves.** Long-tail
-  / delisted historical markets return nothing even with `closed=true`, so
-  some older activities stay without market metadata (their `is_crypto`
-  remains unknown and they're excluded from crypto-only views). Expected;
-  the resolver keeps retrying newly-seen tokens each cycle.
+- **`clob_token_ids` only resolves markets Gamma currently serves** —
+  long-tail / delisted historical markets return nothing even with
+  `closed=true`. **Fixed:** Gamma also accepts `condition_ids` (verified:
+  `?condition_ids=<cid>&closed=true` recovers historical/closed markets the
+  token filter misses). The resolver now discovers missing `condition_id`s
+  directly from `activities` (and from WS payload `market`) and resolves via
+  `condition_ids` (open + `closed=true` two-pass). Live-verified: 8/8
+  previously-unresolvable historical condition_ids resolved with correct
+  `is_crypto` / `resolved` flags. The clob_token_ids path is retained for the
+  v1 dossier flow.
 - **`worker all --once` runs sequentially in dependency order**
   (leaderboard → activity → resolver → reconciler → ws) so a single cold
   command yields a coherent populated DB. Continuous `worker all` (no

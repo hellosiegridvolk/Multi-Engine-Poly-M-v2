@@ -18,9 +18,10 @@ from polymarket_alpha.storage.repositories.activities import (
     ActivityRow,
     insert_or_ignore,
 )
-from polymarket_alpha.workers import activity_poller, leaderboard_poller, reconciler
+from polymarket_alpha.workers import activity_poller, leaderboard_poller, market_resolver, reconciler
 
 DATA_API = "https://data-api.polymarket.com"
+GAMMA_API = "https://gamma-api.polymarket.com"
 
 
 def _lb_records(n=50):
@@ -112,6 +113,70 @@ async def test_activity_backfill_on_first_sight(db_conn):
         "SELECT COUNT(*) FROM activities WHERE wallet = ?", (wallet,)
     )
     assert (await cur.fetchone())[0] == 1  # 5-day-old record => backfill window used
+
+
+@respx.mock
+async def test_resolver_resolves_by_condition_id(db_conn):
+    """Resolver discovers missing condition_ids from activities and resolves
+    them via Gamma condition_ids (recovers historical/closed markets)."""
+    now = int(time.time())
+    wallet = "0xres"
+    await traders_repo.upsert(db_conn, wallet, now_ts=now)
+    cid = "0xCONDHIST"
+    await insert_or_ignore(
+        db_conn,
+        ActivityRow(
+            wallet=wallet,
+            activity_type="TRADE",
+            condition_id=cid,
+            token_id="111",
+            side="BUY",
+            outcome="YES",
+            shares=Decimal("1"),
+            usdc=Decimal("1"),
+            price=Decimal("0.5"),
+            timestamp=now,
+            tx_hash="0xt",
+            source="REST",
+        ),
+        ingested_ts=now,
+    )
+    await db_conn.commit()
+
+    respx.get(f"{GAMMA_API}/tags/slug/crypto").mock(
+        return_value=httpx.Response(200, json={"id": "21", "slug": "crypto"})
+    )
+    market_rec = {
+        "conditionId": cid,
+        "question": "Will BTC moon (resolved)?",
+        "slug": "btc-hist",
+        "closed": True,
+        "endDate": "2025-01-01T00:00:00Z",
+        "outcomes": '["Yes", "No"]',
+        "clobTokenIds": '["111", "222"]',
+        "outcomePrices": '["1", "0"]',
+        "tags": [{"id": "21", "slug": "crypto", "label": "Crypto"}],
+    }
+    respx.get(f"{GAMMA_API}/markets").mock(
+        return_value=httpx.Response(200, json=[market_rec])
+    )
+
+    shutdown = asyncio.Event()
+    await market_resolver.run(db_conn, shutdown, interval=1, once=True)
+
+    m = await db_conn.execute(
+        "SELECT is_crypto, resolved, resolution FROM markets WHERE condition_id=?",
+        (cid,),
+    )
+    row = await m.fetchone()
+    assert row is not None
+    assert row["is_crypto"] == 1
+    assert row["resolved"] == 1
+    assert row["resolution"] == "YES"
+    tok = await db_conn.execute(
+        "SELECT COUNT(*) FROM tokens WHERE condition_id=?", (cid,)
+    )
+    assert (await tok.fetchone())[0] == 2
 
 
 async def test_reconciler_links_ws_to_rest(db_conn):

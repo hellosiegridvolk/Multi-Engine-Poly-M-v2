@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -21,20 +22,22 @@ RESOLUTION_SWEEP_S = 3600
 # Bound work per cycle; isolate transient Gamma 5xx to one small group so a
 # flaky batch never loses the whole cycle (Gamma 500s intermittently on long
 # clob_token_ids URLs).
-MAX_TOKENS_PER_CYCLE = 1500
-RESOLVE_GROUP = 40
-RESOLVE_BATCH = 20
+MAX_IDS_PER_CYCLE = 1500
+RESOLVE_GROUP = 50
+RESOLVE_BATCH = 25
 
 
 async def _resolve_resilient(
-    gamma: GammaClient, token_ids: list[str], *, crypto_tag_id: str
+    gamma: GammaClient, condition_ids: list[str], *, crypto_tag_id: str
 ) -> dict:
+    """Resolve by condition id (recovers historical/closed markets the
+    clob_token_ids filter misses), isolating transient Gamma 5xx per group."""
     resolved: dict = {}
-    for i in range(0, len(token_ids), RESOLVE_GROUP):
-        group = token_ids[i : i + RESOLVE_GROUP]
+    for i in range(0, len(condition_ids), RESOLVE_GROUP):
+        group = condition_ids[i : i + RESOLVE_GROUP]
         try:
             part = await asyncio.to_thread(
-                gamma.fetch_markets_with_tags,
+                gamma.fetch_markets_with_tags_by_condition,
                 group,
                 crypto_tag_id=crypto_tag_id,
                 batch_size=RESOLVE_BATCH,
@@ -42,7 +45,7 @@ async def _resolve_resilient(
             resolved.update(part)
         except PolymarketAPIError as exc:
             log.warning(
-                "skipping %d-token group after Gamma error: %s",
+                "skipping %d-condition group after Gamma error: %s",
                 len(group),
                 exc,
             )
@@ -72,24 +75,28 @@ def _resolution(market: Market) -> tuple[bool, str | None]:
     return True, ("YES" if market.winning_outcome_index == yes_index else "NO")
 
 
-async def _missing_token_ids(conn: aiosqlite.Connection) -> list[str]:
+async def _missing_condition_ids(conn: aiosqlite.Connection) -> list[str]:
     cur = await conn.execute(
         """
-        SELECT DISTINCT a.token_id FROM activities a
-        WHERE a.token_id IS NOT NULL AND a.condition_id NOT IN
+        SELECT DISTINCT condition_id FROM activities
+        WHERE condition_id IS NOT NULL AND condition_id NOT IN
             (SELECT condition_id FROM markets)
         """
     )
-    tokens = {r[0] for r in await cur.fetchall()}
+    cids = {r[0] for r in await cur.fetchall()}
+    # WS raw rows carry the conditionId inside the payload (`market`).
     cur = await conn.execute(
-        """
-        SELECT DISTINCT market_token FROM ws_trades_raw
-        WHERE market_token IS NOT NULL AND market_token NOT IN
-            (SELECT token_id FROM tokens)
-        """
+        "SELECT payload_json FROM ws_trades_raw WHERE promoted_activity_id IS NULL"
     )
-    tokens |= {r[0] for r in await cur.fetchall()}
-    return [t for t in tokens if t]
+    known = await markets_repo.known_condition_ids(conn)
+    for (pj,) in await cur.fetchall():
+        try:
+            cid = json.loads(pj).get("market")
+        except (json.JSONDecodeError, AttributeError):
+            continue
+        if cid and cid not in known:
+            cids.add(cid)
+    return [c for c in cids if c]
 
 
 async def _persist(
@@ -141,41 +148,35 @@ async def run(
 
     async def cycle(_run_id: int) -> tuple[int, int]:
         now_ts = int(time.time())
-        token_ids = (await _missing_token_ids(conn))[:MAX_TOKENS_PER_CYCLE]
+        condition_ids = (await _missing_condition_ids(conn))[:MAX_IDS_PER_CYCLE]
+        seen = len(condition_ids)
         written = 0
-        if token_ids:
+        if condition_ids:
             resolved = await _resolve_resilient(
-                gamma, token_ids, crypto_tag_id=crypto_tag_id
+                gamma, condition_ids, crypto_tag_id=crypto_tag_id
             )
             for market, slugs in resolved.values():
                 await _persist(conn, market, slugs, now_ts=now_ts)
                 written += 1
             await conn.commit()
 
-        # Slower hourly resolution sweep.
+        # Slower hourly resolution sweep — re-resolve unresolved past-end
+        # markets directly by their condition ids.
         if now_ts - state["last_sweep"] >= RESOLUTION_SWEEP_S:
             state["last_sweep"] = now_ts
             stale = await markets_repo.unresolved_past_end(conn, now_ts=now_ts)
-            if stale:
-                cur = await conn.execute(
-                    "SELECT token_id FROM tokens WHERE condition_id IN "
-                    "(%s)" % ",".join("?" * len(stale)),
-                    [m["condition_id"] for m in stale],
+            stale_cids = [m["condition_id"] for m in stale][:MAX_IDS_PER_CYCLE]
+            if stale_cids:
+                re_resolved = await _resolve_resilient(
+                    gamma, stale_cids, crypto_tag_id=crypto_tag_id
                 )
-                sweep_tokens = [r[0] for r in await cur.fetchall()]
-                if sweep_tokens:
-                    re_resolved = await _resolve_resilient(
-                        gamma,
-                        sweep_tokens[:MAX_TOKENS_PER_CYCLE],
-                        crypto_tag_id=crypto_tag_id,
-                    )
-                    for market, slugs in re_resolved.values():
-                        await _persist(conn, market, slugs, now_ts=now_ts)
-                        written += 1
-                    await conn.commit()
-                    log.info("resolution sweep updated %d markets", len(re_resolved))
+                for market, slugs in re_resolved.values():
+                    await _persist(conn, market, slugs, now_ts=now_ts)
+                    written += 1
+                await conn.commit()
+                log.info("resolution sweep updated %d markets", len(re_resolved))
 
-        return len(token_ids), written
+        return seen, written
 
     try:
         await run_loop(

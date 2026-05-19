@@ -326,10 +326,12 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
 
     from polymarket_alpha import storage
 
-    conn = await storage.connect(storage.resolve_db_path(args.db_path))
-    await storage.run_migrations(conn)
-    shutdown = asyncio.Event()
+    db_path = storage.resolve_db_path(args.db_path)
+    boot = await storage.connect(db_path)
+    await storage.run_migrations(boot)
+    await boot.close()
 
+    shutdown = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -337,11 +339,16 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
         except (NotImplementedError, ValueError):
             pass
 
-    def _run_for(name: str):
+    open_conns: list = []
+
+    async def _run_for(name: str):
+        # One connection per worker (WAL): no cross-worker txn interleaving.
+        conn = await storage.connect(db_path)
+        open_conns.append(conn)
         mod_path, default_interval = _WORKERS[name]
         mod = importlib.import_module(mod_path)
         interval = args.interval or default_interval
-        return mod.run(conn, shutdown, interval=interval, once=args.once)
+        await mod.run(conn, shutdown, interval=interval, once=args.once)
 
     try:
         if args.name == "all" and args.once:
@@ -359,12 +366,15 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
                 await _run_for(name)
         else:
             names = list(_WORKERS) if args.name == "all" else [args.name]
-            tasks = [
-                asyncio.create_task(_run_for(n), name=n) for n in names
-            ]
-            await asyncio.gather(*tasks)
+            await asyncio.gather(
+                *(asyncio.create_task(_run_for(n), name=n) for n in names)
+            )
     finally:
-        await conn.close()
+        for c in open_conns:
+            try:
+                await c.close()
+            except Exception:  # noqa: BLE001
+                pass
     return 0
 
 

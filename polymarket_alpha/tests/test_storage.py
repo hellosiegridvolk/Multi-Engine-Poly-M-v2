@@ -2,6 +2,7 @@
 
 import time
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -57,6 +58,56 @@ async def test_activity_dedup_rest_then_ws(db_conn):
     assert id1 == id2  # same dedup_key -> same row
     cur = await db_conn.execute("SELECT COUNT(*) FROM activities")
     assert (await cur.fetchone())[0] == 1
+
+
+async def test_db_backup_produces_gzipped_artifacts(db_conn, tmp_path):
+    import gzip
+    import json as _json
+
+    await traders_repo.upsert(db_conn, "0xbk", now_ts=NOW)
+    await insert_or_ignore(
+        db_conn,
+        ActivityRow(
+            wallet="0xbk",
+            activity_type="TRADE",
+            condition_id="0xc",
+            token_id="1",
+            side="BUY",
+            outcome="YES",
+            shares=Decimal("3"),
+            usdc=Decimal("2"),
+            price=Decimal("0.66"),
+            timestamp=NOW,
+            tx_hash="0xbktx",
+            source="REST",
+        ),
+        ingested_ts=NOW,
+    )
+    await db_conn.commit()
+
+    out = await storage.backup(
+        db_conn, out_dir=tmp_path / "bk", base_name="poly-wallet-data-strategy"
+    )
+    db_gz = Path(out["db_gz"])
+    jsonl_gz = Path(out["jsonl_gz"])
+    assert db_gz.exists() and db_gz.name.endswith(".db.gz")
+    assert jsonl_gz.exists() and jsonl_gz.name.endswith(".jsonl.gz")
+
+    # db.gz is a valid gzip of a usable SQLite snapshot
+    import sqlite3
+
+    restored = tmp_path / "restored.db"
+    with gzip.open(db_gz, "rb") as g:
+        restored.write_bytes(g.read())
+    rc = sqlite3.connect(restored)
+    assert rc.execute("SELECT COUNT(*) FROM activities").fetchone()[0] == 1
+
+    # jsonl.gz: one normalized activity row per line
+    with gzip.open(jsonl_gz, "rt", encoding="utf-8") as g:
+        lines = [l for l in g.read().splitlines() if l.strip()]
+    assert len(lines) == 1
+    row = _json.loads(lines[0])
+    assert row["wallet"] == "0xbk" and row["dedup_key"]
 
 
 async def test_crypto_only_filter(db_conn):

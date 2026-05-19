@@ -86,8 +86,35 @@ python -m polymarket_alpha wallet 0xABC... --hours 24 --crypto-only
 python -m polymarket_alpha table --wallets 0xABC...,0xDEF...
 python -m polymarket_alpha export --since 7d --out activity.jsonl
 
-# db lifecycle: db init | migrate | vacuum | stats   (--db-path / $POLYMARKET_ALPHA_DB)
+# db lifecycle: db init | migrate | vacuum | stats | backup
+#   (--db-path / $POLYMARKET_ALPHA_DB)
 ```
+
+### Backups (Google Drive, every 24h)
+
+`db backup` writes a transactionally-consistent, compacted snapshot
+(`VACUUM INTO`, safe under WAL) plus an all-activities JSONL, both gzipped:
+
+```bash
+python -m polymarket_alpha db backup \
+  --db-path ~/.polymarket_alpha/data.db \
+  --out-dir ~/.polymarket_alpha/backups
+# -> poly-wallet-data-strategy-<UTC>.db.gz   (full DB, ~13MB for ~82k activities)
+#    poly-wallet-data-strategy-<UTC>.jsonl.gz (all activities, ~8MB)
+```
+
+Durable 24h upload runs as a **host cron + rclone** job (independent of any
+agent session — the agent's container is ephemeral). Drive folder
+**"poly wallet data strategy"** already holds a metadata digest and a
+`...-README.md` with the exact cron/rclone/restore commands:
+
+```cron
+17 3 * * *  /usr/local/bin/poly-backup.sh   # db backup + rclone copy to Drive
+```
+
+The multi-MB binaries go via rclone (not inline agent upload, which is
+payload-limited). Restore: `gunzip -c <file>.db.gz > data.db` then
+`db stats` to verify.
 
 Key verified realities driving the v2 design (full detail in `API_NOTES.md`):
 

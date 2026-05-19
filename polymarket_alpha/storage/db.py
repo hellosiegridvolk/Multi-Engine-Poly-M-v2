@@ -90,6 +90,54 @@ async def vacuum(conn: aiosqlite.Connection) -> None:
     await conn.commit()
 
 
+async def backup(
+    conn: aiosqlite.Connection,
+    *,
+    out_dir: Path,
+    base_name: str = "poly-wallet-data-strategy",
+) -> dict[str, str]:
+    """Produce a consistent gzipped snapshot + a gzipped activities JSONL.
+
+    Uses ``VACUUM INTO`` for a transactionally-consistent, compacted copy
+    (safe under WAL). Returns the written file paths. Drive-agnostic: the
+    durable upload is done by a host cron (see README).
+    """
+    import gzip
+    import json
+    import shutil
+    from datetime import datetime, timezone
+
+    out_dir = Path(out_dir).expanduser()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    snap = out_dir / f"{base_name}-{stamp}.db"
+    safe = str(snap).replace("'", "''")
+    await conn.execute(f"VACUUM INTO '{safe}'")
+
+    db_gz = out_dir / f"{base_name}-{stamp}.db.gz"
+    with open(snap, "rb") as src, gzip.open(db_gz, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    snap.unlink()
+
+    jsonl_gz = out_dir / f"{base_name}-{stamp}.jsonl.gz"
+    cur = await conn.execute("SELECT * FROM activities ORDER BY timestamp")
+    cols = [d[0] for d in cur.description]
+    rows = await cur.fetchall()
+    with gzip.open(jsonl_gz, "wt", encoding="utf-8") as g:
+        for r in rows:
+            g.write(json.dumps(dict(zip(cols, r))) + "\n")
+
+    log.info(
+        "backup: %s (%d bytes), %s (%d rows)",
+        db_gz.name,
+        db_gz.stat().st_size,
+        jsonl_gz.name,
+        len(rows),
+    )
+    return {"db_gz": str(db_gz), "jsonl_gz": str(jsonl_gz)}
+
+
 async def table_stats(conn: aiosqlite.Connection) -> dict[str, int]:
     rows = await (
         await conn.execute(

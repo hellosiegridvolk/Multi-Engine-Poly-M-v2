@@ -2,6 +2,7 @@
 
 from polymarket_alpha.storage.db import (
     DEFAULT_DB_PATH,
+    backup,
     connect,
     current_version,
     resolve_db_path,
@@ -12,6 +13,7 @@ from polymarket_alpha.storage.db import (
 
 __all__ = [
     "DEFAULT_DB_PATH",
+    "backup",
     "connect",
     "current_version",
     "resolve_db_path",

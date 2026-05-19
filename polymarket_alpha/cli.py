@@ -92,7 +92,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_audit_args(audit)
 
     db = sub.add_parser("db", help="database lifecycle")
-    db.add_argument("action", choices=["init", "migrate", "vacuum", "stats"])
+    db.add_argument(
+        "action", choices=["init", "migrate", "vacuum", "stats", "backup"]
+    )
+    db.add_argument(
+        "--out-dir",
+        default="~/.polymarket_alpha/backups",
+        help="backup output directory (db backup)",
+    )
+    db.add_argument(
+        "--base-name",
+        default="poly-wallet-data-strategy",
+        help="backup file base name (db backup)",
+    )
     _add_db_path(db)
 
     worker = sub.add_parser("worker", help="run an ingest worker")
@@ -305,6 +317,16 @@ async def _cmd_db(args: argparse.Namespace) -> int:
         elif args.action == "stats":
             for name, cnt in (await storage.table_stats(conn)).items():
                 print(f"{name:<24} {cnt}")
+        elif args.action == "backup":
+            from pathlib import Path
+
+            paths = await storage.backup(
+                conn,
+                out_dir=Path(args.out_dir),
+                base_name=args.base_name,
+            )
+            for kind, p in paths.items():
+                print(f"{kind}\t{p}")
     finally:
         await conn.close()
     return 0

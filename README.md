@@ -116,6 +116,38 @@ The multi-MB binaries go via rclone (not inline agent upload, which is
 payload-limited). Restore: `gunzip -c <file>.db.gz > data.db` then
 `db stats` to verify.
 
+### Deployment (runs independently of any agent session)
+
+The tool is standalone Python — no agent/MCP dependency at runtime. Run it
+on a host or in a container; the agent only ever monitors on demand.
+
+**Docker / OrbStack** (same image both; OrbStack = Linux containers on macOS):
+
+```bash
+rclone config                       # one-time: create remote 'gdrive'
+docker compose up -d                # worker (all 5) + daily backup service
+docker compose logs -f worker
+docker compose exec worker python -m polymarket_alpha db stats
+```
+
+`docker-compose.yml` runs two services off one image sharing a **named
+volume** `poly_data` (the SQLite DB — survives rebuilds; keep it on a local
+volume, not a network/overlay FS, for WAL correctness). The `backup` service
+runs `scripts/backup-loop.sh` (daily `db backup` + `rclone copy` to the
+"poly wallet data strategy" Drive folder). `SIGTERM` (docker stop) triggers
+a graceful worker shutdown.
+
+**systemd** (non-Docker): `deploy/polymarket-alpha.service` runs `worker
+all`; `deploy/polymarket-alpha-backup.{service,timer}` does the daily
+backup. Edit the `CHANGE_ME`/paths, copy to `/etc/systemd/system/`,
+`daemon-reload`, then enable both units.
+
+**Persistence is the only hard requirement** — the DB must live on a
+durable volume/path. **Monitoring**: read the tool's own signals
+(`db stats`, `ingest_runs.errors_count`, container/journal logs), not the
+agent. The agent session is optional and on-call only (PR webhooks /
+explicit invocation); it cannot be a 24/7 daemon.
+
 Key verified realities driving the v2 design (full detail in `API_NOTES.md`):
 
 - **Leaderboard** page size caps at **50** (not ~3000) — offset-paginated, deep.

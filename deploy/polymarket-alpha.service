@@ -1,0 +1,23 @@
+# Non-Docker alternative: run all five ingest workers as a service.
+# Install: edit the placeholders, then
+#   sudo cp deploy/polymarket-alpha.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now polymarket-alpha
+[Unit]
+Description=polymarket_alpha ingest workers (worker all)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=CHANGE_ME
+WorkingDirectory=/opt/polymarket_alpha
+Environment=POLYMARKET_ALPHA_DB=%h/.polymarket_alpha/data.db
+# Use the venv python that has the package installed:
+ExecStart=/opt/polymarket_alpha/.venv/bin/python -m polymarket_alpha worker all
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

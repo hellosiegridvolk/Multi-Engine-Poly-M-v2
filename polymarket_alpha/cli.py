@@ -337,20 +337,32 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
         except (NotImplementedError, ValueError):
             pass
 
-    names = list(_WORKERS) if args.name == "all" else [args.name]
-    tasks = []
-    for name in names:
+    def _run_for(name: str):
         mod_path, default_interval = _WORKERS[name]
         mod = importlib.import_module(mod_path)
         interval = args.interval or default_interval
-        tasks.append(
-            asyncio.create_task(
-                mod.run(conn, shutdown, interval=interval, once=args.once),
-                name=name,
-            )
-        )
+        return mod.run(conn, shutdown, interval=interval, once=args.once)
+
     try:
-        await asyncio.gather(*tasks)
+        if args.name == "all" and args.once:
+            # Single coherent cold cycle: respect data dependencies
+            # (activity -> resolver -> reconciler; ws after markets exist).
+            for name in (
+                "leaderboard",
+                "activity",
+                "resolver",
+                "reconciler",
+                "ws",
+            ):
+                if shutdown.is_set():
+                    break
+                await _run_for(name)
+        else:
+            names = list(_WORKERS) if args.name == "all" else [args.name]
+            tasks = [
+                asyncio.create_task(_run_for(n), name=n) for n in names
+            ]
+            await asyncio.gather(*tasks)
     finally:
         await conn.close()
     return 0

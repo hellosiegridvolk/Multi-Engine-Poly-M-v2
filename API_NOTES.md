@@ -150,3 +150,25 @@ computed from the **raw** price first, then quantized down
   tx/type/market/side/size/timestamp would collapse to one row (vanishingly
   rare; acceptable for a research tool).
 - Leaderboard depth is large but the poller caps at a configurable top-N.
+
+## v2 operational findings (from live cold bring-up)
+
+- **Gamma intermittently 500s on long `clob_token_ids` URLs.** A 50-id batch
+  (~4.7 KB URL) succeeds most of the time but returns HTTP 500 sporadically.
+  Mitigation: the resolver uses 20-id Gamma batches grouped in 40-token
+  chunks with **per-chunk error isolation** (a flaky batch is logged and
+  skipped, never aborting the whole cycle) and a per-cycle token cap so
+  progress is incremental and bounded.
+- **`clob_token_ids` only resolves markets Gamma currently serves.** Long-tail
+  / delisted historical markets return nothing even with `closed=true`, so
+  some older activities stay without market metadata (their `is_crypto`
+  remains unknown and they're excluded from crypto-only views). Expected;
+  the resolver keeps retrying newly-seen tokens each cycle.
+- **`worker all --once` runs sequentially in dependency order**
+  (leaderboard → activity → resolver → reconciler → ws) so a single cold
+  command yields a coherent populated DB. Continuous `worker all` (no
+  `--once`) runs the five workers concurrently, which is correct because the
+  resolver/reconciler loops self-heal as upstream data lands.
+- Activity backfill of a fresh ~300-wallet watchlist is heavy on the first
+  cycle (one-shot ≈ tens of thousands of rows); steady state is incremental
+  (poll only since the max stored timestamp per wallet).

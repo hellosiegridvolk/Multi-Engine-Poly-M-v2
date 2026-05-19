@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import aiosqlite
 
 from polymarket_alpha.clients.gamma import GammaClient
-from polymarket_alpha.http import build_client
+from polymarket_alpha.http import PolymarketAPIError, build_client
 from polymarket_alpha.models import Market
 from polymarket_alpha.storage.repositories import markets as markets_repo
 from polymarket_alpha.workers import run_loop
@@ -18,6 +18,35 @@ from polymarket_alpha.workers import run_loop
 log = logging.getLogger("polymarket_alpha.workers.resolver")
 
 RESOLUTION_SWEEP_S = 3600
+# Bound work per cycle; isolate transient Gamma 5xx to one small group so a
+# flaky batch never loses the whole cycle (Gamma 500s intermittently on long
+# clob_token_ids URLs).
+MAX_TOKENS_PER_CYCLE = 1500
+RESOLVE_GROUP = 40
+RESOLVE_BATCH = 20
+
+
+async def _resolve_resilient(
+    gamma: GammaClient, token_ids: list[str], *, crypto_tag_id: str
+) -> dict:
+    resolved: dict = {}
+    for i in range(0, len(token_ids), RESOLVE_GROUP):
+        group = token_ids[i : i + RESOLVE_GROUP]
+        try:
+            part = await asyncio.to_thread(
+                gamma.fetch_markets_with_tags,
+                group,
+                crypto_tag_id=crypto_tag_id,
+                batch_size=RESOLVE_BATCH,
+            )
+            resolved.update(part)
+        except PolymarketAPIError as exc:
+            log.warning(
+                "skipping %d-token group after Gamma error: %s",
+                len(group),
+                exc,
+            )
+    return resolved
 
 
 def _iso_to_ts(iso: str | None) -> int | None:
@@ -112,13 +141,11 @@ async def run(
 
     async def cycle(_run_id: int) -> tuple[int, int]:
         now_ts = int(time.time())
-        token_ids = await _missing_token_ids(conn)
+        token_ids = (await _missing_token_ids(conn))[:MAX_TOKENS_PER_CYCLE]
         written = 0
         if token_ids:
-            resolved = await asyncio.to_thread(
-                gamma.fetch_markets_with_tags,
-                token_ids,
-                crypto_tag_id=crypto_tag_id,
+            resolved = await _resolve_resilient(
+                gamma, token_ids, crypto_tag_id=crypto_tag_id
             )
             for market, slugs in resolved.values():
                 await _persist(conn, market, slugs, now_ts=now_ts)
@@ -137,9 +164,9 @@ async def run(
                 )
                 sweep_tokens = [r[0] for r in await cur.fetchall()]
                 if sweep_tokens:
-                    re_resolved = await asyncio.to_thread(
-                        gamma.fetch_markets_with_tags,
-                        sweep_tokens,
+                    re_resolved = await _resolve_resilient(
+                        gamma,
+                        sweep_tokens[:MAX_TOKENS_PER_CYCLE],
                         crypto_tag_id=crypto_tag_id,
                     )
                     for market, slugs in re_resolved.values():

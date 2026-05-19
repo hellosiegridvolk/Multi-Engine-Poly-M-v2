@@ -30,6 +30,7 @@ class LeaderboardClient:
         window: str,
         limit: int = 25,
         category: str | None = "crypto",
+        offset: int = 0,
     ) -> list[Trader]:
         if window not in WINDOWS:
             raise ValueError(f"window must be one of {sorted(WINDOWS)}, got {window!r}")
@@ -38,6 +39,8 @@ class LeaderboardClient:
             ("window", window),
             ("limit", str(limit)),
         ]
+        if offset:
+            params.append(("offset", str(offset)))
         if category:
             params.append(("category", category))
 

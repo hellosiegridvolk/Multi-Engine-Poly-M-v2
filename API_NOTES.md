@@ -64,3 +64,89 @@ computed from the **raw** price first, then quantized down
 - Multi-outcome (>2) markets excluded from conviction/direction (noted).
 - Server-side leaderboard `category` is best-effort only.
 - Private/empty wallets → near-empty dossier (exit 0, not an error).
+
+---
+
+# v2 verification (storage + WebSocket + multi-timeframe)
+
+## A. CLOB WebSocket — VERIFIED
+
+- **URL:** `wss://ws-subscriptions-clob.polymarket.com/ws/market` (the public
+  *market* channel). Confirmed live. Stored as an overridable config constant,
+  not hardcoded at call sites.
+- **Subscribe:** send one JSON text frame `{"assets_ids": [<token_id>, ...],
+  "type": "market"}`. Adding more token ids = send another such frame on the
+  same socket (no teardown needed).
+- **Event types on the market channel** (each frame is a JSON *array* of events):
+  - `book` — full order-book snapshot (on subscribe + periodic).
+  - `price_change` — order-book delta (`price_changes[]`).
+  - `last_trade_price` — **the trade print.** Fields: `market` (conditionId),
+    `asset_id` (token id), `price`, `size`, `side` (BUY/SELL), `timestamp`
+    (ms string), `fee_rate_bps`, `event_type`, `transaction_hash` (0x…).
+- **CRITICAL — no wallet attribution.** The public market channel's
+  `last_trade_price` has **no maker/taker wallet and no log_index**. The
+  authenticated `user` channel only streams *your own* account and is useless
+  for auditing arbitrary traders. Consequence: WS is a **market-level trade
+  tape**, not a wallet-keyed feed. The reconciler therefore **links** a
+  `ws_trades_raw` row to an existing REST-sourced `activities` row by
+  `transaction_hash` (enrichment / confirmation, and sets
+  `promoted_activity_id`); it does **not** mint wallet-less activity rows.
+  WS prints with no matching REST activity stay unpromoted — expected, not an
+  error (flagged in `ingest_runs.notes`).
+- **Ping/pong:** sending the text frame `PING` returns text `PONG`. The
+  `websockets` library's protocol-level ping (`ping_interval`) also keeps the
+  connection alive (verified 60s idle). We rely on the library's ping plus an
+  app-level `PING` every ~10s; no custom `while True` reconnect loop.
+- **Reconnect:** exponential backoff 1→2→4→…→60s cap; re-send all active
+  subscriptions on reconnect.
+
+## B. Leaderboard pagination — spec belief WRONG
+
+- Nicola believed the cap was ~3000. **Reality: per-query page size caps at
+  50** (`limit=100/1000/10000` all return 50). Pagination is **offset-based**
+  (`&offset=`, verified: `offset=10` → ranks start at 11). Data extends well
+  past `offset=5000` (still returns 50). So: page size 50, offset-paginated,
+  deep. The leaderboard poller pages with `offset` up to a configurable max
+  (default top 500) and sets `hit_pagination_cap=1` only if a page returns
+  fewer than 50 before reaching the configured max.
+- **Period values:** `window=` accepts `day|week|month|all`. Unknown values
+  (`hour`, `year`) don't error but have unverified semantics → only the four
+  canonical values are used. (Param is `window`, not `period`.)
+- Leaderboard records have **no `trade_count`** field → `leaderboard_entries.
+  trade_count` is stored NULL.
+
+## C. Activity pagination / types — re-confirmed + refined
+
+- Page size default 100; **hard offset ceiling at 3000** (HTTP 400 beyond) —
+  unchanged from v1.
+- **One query returns ALL activity types mixed** (observed `TRADE` + `REDEEM`
+  together with no `type` param). `type=` also accepts a comma list
+  (`type=TRADE,REDEEM`). The activity poller therefore **omits `type`
+  entirely** and stores everything; filtering is at query time only.
+- **No `log_index` field anywhere** (neither REST activity nor WS). The
+  spec's `UNIQUE (tx_hash, log_index)` is therefore unimplementable as-is.
+  **Adaptation:** the natural dedup key is a content hash
+  `dedup_key = sha1(tx_hash|activity_type|condition_id|token_id|side|shares|timestamp)`,
+  `UNIQUE(dedup_key)`, inserted with `INSERT OR IGNORE`. This makes REST/WS
+  dedup deterministic and stable across re-polls. (`log_index` kept as a
+  nullable column for forward-compat; populated if the API ever exposes it.)
+
+## D. Market category tagging — VERIFIED
+
+- Gamma exposes tags via `?include_tag=true` → each market gets a `tags`
+  array of `{id, slug, label}`. A crypto market carries e.g.
+  `[(21,'crypto'), (235,'bitcoin'), (1312,'crypto-prices')]`.
+- **`is_crypto` rule:** any tag with `slug == "crypto"` or `id == "21"`
+  (canonical; matches v1, confirmed correct on live data). The full slug list
+  is stored in `markets.category_tags` (JSON) for richer downstream filtering.
+
+## v2 known limitations
+
+- WS provides market-tape trades only (no wallet); wallet attribution comes
+  solely from REST `/activity`. WS rows without a matching REST tx stay
+  unpromoted by design.
+- No `log_index` → dedup is a deterministic content hash, not the on-chain
+  (tx, logIndex) pair. Two genuinely distinct fills with identical
+  tx/type/market/side/size/timestamp would collapse to one row (vanishingly
+  rare; acceptable for a research tool).
+- Leaderboard depth is large but the poller caps at a configurable top-N.

@@ -130,8 +130,18 @@ class GammaClient:
         is 20 (max 100), so an explicit limit is sent and ``batch_size`` is
         kept well under 100 markets per response.
         """
-        unique = [t for t in dict.fromkeys(token_ids) if t]
         result: dict[str, Market] = {}
+        for rec in self._iter_raw_markets(token_ids, batch_size=batch_size):
+            market = _parse_market(rec, crypto_tag_id=crypto_tag_id)
+            if market and market.condition_id:
+                result[market.condition_id] = market
+        return result
+
+    def _iter_raw_markets(
+        self, token_ids: Sequence[str], *, batch_size: int = 50
+    ):
+        """Yield raw market dicts (open + closed merged, include_tag)."""
+        unique = [t for t in dict.fromkeys(token_ids) if t]
         for start in range(0, len(unique), batch_size):
             chunk = unique[start : start + batch_size]
             base = [("clob_token_ids", t) for t in chunk]
@@ -145,8 +155,27 @@ class GammaClient:
                 )
                 if not isinstance(payload, list):
                     continue
-                for rec in payload:
-                    market = _parse_market(rec, crypto_tag_id=crypto_tag_id)
-                    if market and market.condition_id:
-                        result[market.condition_id] = market
+                yield from payload
+
+    def fetch_markets_with_tags(
+        self,
+        token_ids: Sequence[str],
+        *,
+        crypto_tag_id: str | None = None,
+        batch_size: int = 50,
+    ) -> dict[str, tuple[Market, list[str]]]:
+        """Like :meth:`fetch_markets_by_token_ids` but also returns each
+        market's tag slug list (single fetch, no extra HTTP)."""
+        result: dict[str, tuple[Market, list[str]]] = {}
+        for rec in self._iter_raw_markets(token_ids, batch_size=batch_size):
+            market = _parse_market(rec, crypto_tag_id=crypto_tag_id)
+            if not (market and market.condition_id):
+                continue
+            tags = rec.get("tags")
+            slugs = (
+                [str(t.get("slug")) for t in tags if isinstance(t, dict) and t.get("slug")]
+                if isinstance(tags, list)
+                else []
+            )
+            result[market.condition_id] = (market, slugs)
         return result

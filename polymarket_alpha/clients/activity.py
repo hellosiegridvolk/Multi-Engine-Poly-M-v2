@@ -99,6 +99,69 @@ class ActivityClient:
 
         return collected
 
+    def fetch_activity(
+        self,
+        wallet: str,
+        *,
+        max_items: int | None = None,
+        since_ts: int = 0,
+        page_size: int = 100,
+    ) -> list[dict]:
+        """Fetch ALL activity types (no `type` filter) as raw records.
+
+        Same verified pagination + offset-3000 ceiling + HTTP-400 stop as
+        :meth:`fetch_trades`. Stops early once records older than `since_ts`
+        are reached (results are newest-first).
+        """
+        wallet = wallet.lower()
+        collected: list[dict] = []
+        offset = 0
+        while True:
+            if offset > MAX_OFFSET:
+                log.warning(
+                    "activity stop at offset %d (ceiling %d); %d records",
+                    offset,
+                    MAX_OFFSET,
+                    len(collected),
+                )
+                break
+            params: list[tuple[str, str]] = [
+                ("user", wallet),
+                ("limit", str(page_size)),
+                ("offset", str(offset)),
+            ]
+            try:
+                payload = request_json(
+                    self._client, "GET", f"{DATA_API}{ACTIVITY_PATH}", params=params
+                )
+            except PolymarketAPIError as exc:
+                if exc.status_code == 400 and collected:
+                    log.warning(
+                        "activity pagination stopped at offset %d (HTTP 400)",
+                        offset,
+                    )
+                    break
+                raise
+            if not isinstance(payload, list):
+                raise PolymarketAPIError(
+                    f"activity returned {type(payload).__name__}, expected list",
+                    url=f"{DATA_API}{ACTIVITY_PATH}",
+                )
+            if not payload:
+                break
+            stop = False
+            for rec in payload:
+                if int(rec.get("timestamp", 0)) < since_ts:
+                    stop = True
+                    break
+                collected.append(rec)
+                if max_items is not None and len(collected) >= max_items:
+                    return collected[:max_items]
+            if stop or len(payload) < page_size:
+                break
+            offset += page_size
+        return collected
+
     @staticmethod
     def _parse_trade(record: dict) -> Trade:
         return Trade(

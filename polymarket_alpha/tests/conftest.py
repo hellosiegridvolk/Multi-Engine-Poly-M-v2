@@ -67,6 +67,18 @@ def make_market(
 
 
 @pytest.fixture
+async def db_conn(tmp_path):
+    from polymarket_alpha import storage
+
+    conn = await storage.connect(tmp_path / "test.db")
+    await storage.run_migrations(conn)
+    try:
+        yield conn
+    finally:
+        await conn.close()
+
+
+@pytest.fixture
 def trade_factory():
     return make_trade
 

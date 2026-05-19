@@ -67,9 +67,46 @@ polymarket_alpha/
   tests/                  # pytest + respx (no real network in tests)
 ```
 
+## v2 — persistent storage + WebSocket + multi-timeframe
+
+A SQLite layer + scheduled REST/WS workers that continuously ingest
+leaderboards, wallet activity, market metadata and live crypto trade prints.
+The v1 verified clients are reused as-is (with additive pagination only).
+
+```bash
+# bring it up cold
+python -m polymarket_alpha db init
+python -m polymarket_alpha worker all            # 5 workers in one process
+#   (or run individually: worker leaderboard|activity|ws|resolver|reconciler)
+#   --once = single cycle (cron/test); --interval N = override loop seconds
+
+# read-only queries (SQLite only — never hits the live API)
+python -m polymarket_alpha leaderboard week --at 2026-05-18T12:00:00Z
+python -m polymarket_alpha wallet 0xABC... --hours 24 --crypto-only
+python -m polymarket_alpha table --wallets 0xABC...,0xDEF...
+python -m polymarket_alpha export --since 7d --out activity.jsonl
+
+# db lifecycle: db init | migrate | vacuum | stats   (--db-path / $POLYMARKET_ALPHA_DB)
+```
+
+Key verified realities driving the v2 design (full detail in `API_NOTES.md`):
+
+- **Leaderboard** page size caps at **50** (not ~3000) — offset-paginated, deep.
+- **Activity** has a hard **offset-3000** ceiling; one query returns all
+  activity types mixed (poller stores everything, filters at query time).
+- **No `log_index`** anywhere → dedup is a deterministic content hash.
+- **CLOB WS** (`wss://ws-subscriptions-clob.polymarket.com/ws/market`) trade
+  prints (`last_trade_price`) carry **no wallet** — WS is a market tape; the
+  reconciler links WS prints to REST activities by `tx_hash`.
+
+Storage: `aiosqlite`, WAL mode, versioned `.sql` migrations, all money as
+TEXT↔`Decimal` at the repository boundary.
+
 ### Test
 
 ```bash
-pytest -q          # 51 tests: implied-prob (4 cases + rounding),
-                   # clobTokenIds double-decode, sizing classifier, etc.
+pytest -q          # v1 + v2: implied-prob math, clobTokenIds double-decode,
+                   # sizing classifier, migrations, REST/WS dedup, crypto
+                   # filter, WS re-subscribe, pagination-cap, backfill,
+                   # reconciler, byte-for-byte staleness table.
 ```

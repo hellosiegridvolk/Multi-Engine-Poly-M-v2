@@ -85,6 +85,9 @@ python -m polymarket_alpha leaderboard week --at 2026-05-18T12:00:00Z
 python -m polymarket_alpha wallet 0xABC... --hours 24 --crypto-only
 python -m polymarket_alpha table --wallets 0xABC...,0xDEF...
 python -m polymarket_alpha export --since 7d --out activity.jsonl
+python -m polymarket_alpha strategies --period week --top 20    # categorize wallets
+#   sizing/conviction/direction/speed buckets + per-wallet PnL & hit-rate
+#   (--format json for machine-readable; --at ISO8601 for historical snapshot)
 
 # db lifecycle: db init | migrate | vacuum | stats | backup
 #   (--db-path / $POLYMARKET_ALPHA_DB)

@@ -137,6 +137,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     exp.add_argument("--out", default="-")
     _add_db_path(exp)
 
+    strat = sub.add_parser(
+        "strategies",
+        help="categorize wallet strategies + per-bucket PnL/hit-rate",
+    )
+    strat.add_argument(
+        "--period",
+        choices=["day", "week", "month", "all"],
+        default="all",
+        help="leaderboard window (default: all three)",
+    )
+    strat.add_argument("--top", type=int, default=20, help="top N wallets per period")
+    strat.add_argument("--at", default=None, help="ISO8601; latest at-or-before")
+    strat.add_argument("--format", choices=["human", "json"], default="human")
+    _add_db_path(strat)
+
     return p
 
 
@@ -290,7 +305,9 @@ def run_audit(args: argparse.Namespace) -> int:
     return 0
 
 
-_SUBCOMMANDS = {"audit", "db", "worker", "wallet", "leaderboard", "table", "export"}
+_SUBCOMMANDS = {
+    "audit", "db", "worker", "wallet", "leaderboard", "table", "export", "strategies",
+}
 
 
 def _parse_since(s: str) -> int:
@@ -468,6 +485,44 @@ async def _cmd_table(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_strategies(args: argparse.Namespace) -> int:
+    from datetime import datetime, timezone
+
+    from polymarket_alpha import storage
+    from polymarket_alpha.helpers.strategies import (
+        analyze,
+        render_human,
+        report_to_dict,
+    )
+
+    conn = await storage.connect(storage.resolve_db_path(args.db_path))
+    try:
+        at_ts = None
+        if args.at:
+            at_ts = int(
+                datetime.fromisoformat(args.at.replace("Z", "+00:00"))
+                .astimezone(timezone.utc)
+                .timestamp()
+            )
+        periods = (
+            ["day", "week", "month"] if args.period == "all" else [args.period]
+        )
+        reports = []
+        for p in periods:
+            reports.append(
+                await analyze(conn, period=p, top=args.top, at_ts=at_ts)
+            )
+        if args.format == "json":
+            print(json.dumps([report_to_dict(r) for r in reports], indent=2))
+        else:
+            for r in reports:
+                print(render_human(r))
+                print()
+    finally:
+        await conn.close()
+    return 0
+
+
 async def _cmd_export(args: argparse.Namespace) -> int:
     import time
 
@@ -516,6 +571,7 @@ def main() -> None:
         "leaderboard": _cmd_leaderboard,
         "table": _cmd_table,
         "export": _cmd_export,
+        "strategies": _cmd_strategies,
     }
     sys.exit(asyncio.run(handlers[args.command](args)))
 

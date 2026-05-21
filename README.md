@@ -91,6 +91,9 @@ python -m polymarket_alpha strategies --period week --top 20    # categorize wal
 python -m polymarket_alpha shortlist --top 2 --output sources.yaml  # weekly re-eval
 #   emit a copy_sources.yaml drop-in: top-N wallets filtered by realized PnL +
 #   hit rate, weighted by cross-snapshot persistence (durable > one-day spike)
+python -m polymarket_alpha refresh --output ~/.polymarket_alpha/sources.yaml
+#   full 4h cycle: leaderboard -> activity -> resolver -> shortlist, with
+#   atomic yaml write + diff vs. previous run (ADDED/REMOVED/UNCHANGED lines)
 
 # db lifecycle: db init | migrate | vacuum | stats | backup
 #   (--db-path / $POLYMARKET_ALPHA_DB)
@@ -145,8 +148,16 @@ a graceful worker shutdown.
 
 **systemd** (non-Docker): `deploy/polymarket-alpha.service` runs `worker
 all`; `deploy/polymarket-alpha-backup.{service,timer}` does the daily
-backup. Edit the `CHANGE_ME`/paths, copy to `/etc/systemd/system/`,
-`daemon-reload`, then enable both units.
+backup; `deploy/polymarket-alpha-refresh.{service,timer}` does the
+**4-hour shortlist refresh** (leaderboard → activity → resolver →
+shortlist; atomic write to `~/.polymarket_alpha/sources.yaml`). Edit the
+`CHANGE_ME`/paths, copy to `/etc/systemd/system/`, `daemon-reload`, then
+`systemctl enable --now polymarket-alpha-refresh.timer`.
+
+For a host crontab alternative, the equivalent line is:
+```cron
+0 */4 * * *  /opt/polymarket_alpha/scripts/4h-refresh.sh
+```
 
 **Persistence is the only hard requirement** — the DB must live on a
 durable volume/path. **Monitoring**: read the tool's own signals

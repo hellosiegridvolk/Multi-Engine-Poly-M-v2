@@ -1,0 +1,12 @@
+[Unit]
+Description=Run polymarket_alpha refresh every 4 hours
+
+[Timer]
+# Aligned to 02:17 / 06:17 / 10:17 / 14:17 / 18:17 / 22:17 UTC.
+# Slightly off the hour to avoid contention with the daily backup timer.
+OnCalendar=*-*-* 02,06,10,14,18,22:17:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

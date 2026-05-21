@@ -166,6 +166,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sl.add_argument("--output", default="-", help="path or '-' for stdout")
     _add_db_path(sl)
 
+    rf = sub.add_parser(
+        "refresh",
+        help="4h cycle: leaderboard + activity + resolver + shortlist",
+    )
+    rf.add_argument("--top", type=int, default=2)
+    rf.add_argument("--min-hit-rate", type=str, default="0.55")
+    rf.add_argument(
+        "--output",
+        default="/var/polymarket_alpha/sources.yaml",
+        help="where to write the resulting sources.yaml",
+    )
+    rf.add_argument(
+        "--max-trades-per-wallet",
+        type=int,
+        default=300,
+        help="bound activity backfill per wallet (default: 300)",
+    )
+    _add_db_path(rf)
+
     return p
 
 
@@ -321,7 +340,7 @@ def run_audit(args: argparse.Namespace) -> int:
 
 _SUBCOMMANDS = {
     "audit", "db", "worker", "wallet", "leaderboard", "table", "export",
-    "strategies", "shortlist",
+    "strategies", "shortlist", "refresh",
 }
 
 
@@ -538,6 +557,45 @@ async def _cmd_strategies(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_refresh(args: argparse.Namespace) -> int:
+    from decimal import Decimal
+    from pathlib import Path
+
+    from polymarket_alpha import storage
+    from polymarket_alpha.refresh import run_refresh
+
+    db_path = storage.resolve_db_path(args.db_path)
+    conn = await storage.connect(db_path)
+    try:
+        await storage.run_migrations(conn)
+        out_path = Path(args.output) if args.output and args.output != "-" else None
+        result = await run_refresh(
+            conn,
+            top=args.top,
+            min_hit_rate=Decimal(args.min_hit_rate),
+            output_path=out_path,
+            diff_against=out_path,
+            max_items_per_wallet=args.max_trades_per_wallet,
+        )
+    finally:
+        await conn.close()
+
+    duration = result.finished_ts - result.started_ts
+    print(
+        f"# refresh: {duration}s "
+        f"leaderboard={'ok' if result.leaderboard_ok else 'FAIL'} "
+        f"activity={'ok' if result.activity_ok else 'FAIL'} "
+        f"resolver={'ok' if result.resolver_ok else 'FAIL'} "
+        f"shortlist={len(result.shortlist_entries)}",
+        file=sys.stderr,
+    )
+    for change in result.changes_vs_previous:
+        print(f"# {change}", file=sys.stderr)
+    for err in result.errors:
+        print(f"# ERROR: {err}", file=sys.stderr)
+    return 1 if result.errors and not result.shortlist_entries else 0
+
+
 async def _cmd_shortlist(args: argparse.Namespace) -> int:
     from decimal import Decimal
 
@@ -618,6 +676,7 @@ def main() -> None:
         "export": _cmd_export,
         "strategies": _cmd_strategies,
         "shortlist": _cmd_shortlist,
+        "refresh": _cmd_refresh,
     }
     sys.exit(asyncio.run(handlers[args.command](args)))
 

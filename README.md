@@ -88,6 +88,9 @@ python -m polymarket_alpha export --since 7d --out activity.jsonl
 python -m polymarket_alpha strategies --period week --top 20    # categorize wallets
 #   sizing/conviction/direction/speed buckets + per-wallet PnL & hit-rate
 #   (--format json for machine-readable; --at ISO8601 for historical snapshot)
+python -m polymarket_alpha shortlist --top 2 --output sources.yaml  # weekly re-eval
+#   emit a copy_sources.yaml drop-in: top-N wallets filtered by realized PnL +
+#   hit rate, weighted by cross-snapshot persistence (durable > one-day spike)
 
 # db lifecycle: db init | migrate | vacuum | stats | backup
 #   (--db-path / $POLYMARKET_ALPHA_DB)

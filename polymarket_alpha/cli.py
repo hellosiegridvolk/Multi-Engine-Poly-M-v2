@@ -152,6 +152,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     strat.add_argument("--format", choices=["human", "json"], default="human")
     _add_db_path(strat)
 
+    sl = sub.add_parser(
+        "shortlist",
+        help="emit a copy_sources.yaml shortlist of wallets to shadow",
+    )
+    sl.add_argument("--top", type=int, default=2, help="number of wallets (default: 2)")
+    sl.add_argument(
+        "--min-hit-rate",
+        type=str,
+        default="0.55",
+        help="reject wallets below this realized hit rate (default: 0.55)",
+    )
+    sl.add_argument("--output", default="-", help="path or '-' for stdout")
+    _add_db_path(sl)
+
     return p
 
 
@@ -306,7 +320,8 @@ def run_audit(args: argparse.Namespace) -> int:
 
 
 _SUBCOMMANDS = {
-    "audit", "db", "worker", "wallet", "leaderboard", "table", "export", "strategies",
+    "audit", "db", "worker", "wallet", "leaderboard", "table", "export",
+    "strategies", "shortlist",
 }
 
 
@@ -523,6 +538,36 @@ async def _cmd_strategies(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_shortlist(args: argparse.Namespace) -> int:
+    from decimal import Decimal
+
+    from polymarket_alpha import storage
+    from polymarket_alpha.helpers.strategies import (
+        render_copy_sources_yaml,
+        shortlist,
+    )
+
+    conn = await storage.connect(storage.resolve_db_path(args.db_path))
+    try:
+        entries = await shortlist(
+            conn, top=args.top, min_hit_rate=Decimal(args.min_hit_rate)
+        )
+        yaml_text = render_copy_sources_yaml(entries)
+        if args.output == "-":
+            print(yaml_text)
+        else:
+            with open(args.output, "w", encoding="utf-8") as fh:
+                fh.write(yaml_text + "\n")
+            print(
+                f"# wrote {len(entries)} entries to {args.output}",
+                file=sys.stderr,
+            )
+        print(f"# {len(entries)} wallets shortlisted", file=sys.stderr)
+    finally:
+        await conn.close()
+    return 0
+
+
 async def _cmd_export(args: argparse.Namespace) -> int:
     import time
 
@@ -572,6 +617,7 @@ def main() -> None:
         "table": _cmd_table,
         "export": _cmd_export,
         "strategies": _cmd_strategies,
+        "shortlist": _cmd_shortlist,
     }
     sys.exit(asyncio.run(handlers[args.command](args)))
 

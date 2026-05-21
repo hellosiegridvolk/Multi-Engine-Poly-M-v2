@@ -2,7 +2,13 @@
 
 from decimal import Decimal
 
-from polymarket_alpha.helpers.strategies import analyze, render_human, report_to_dict
+from polymarket_alpha.helpers.strategies import (
+    analyze,
+    render_copy_sources_yaml,
+    render_human,
+    report_to_dict,
+    shortlist,
+)
 from polymarket_alpha.storage.repositories import leaderboard as lb_repo
 from polymarket_alpha.storage.repositories import markets as markets_repo
 from polymarket_alpha.storage.repositories import traders as traders_repo
@@ -134,3 +140,100 @@ async def test_analyze_buckets_and_dossiers(db_conn):
 async def test_analyze_no_snapshot_is_empty(db_conn):
     report = await analyze(db_conn, period="week", top=10)
     assert report.dossiers == [] and report.buckets == []
+
+
+# -- shortlist --
+
+async def _seed_two_snapshots(db_conn, w_keep: str, w_drop: str, w_new: str):
+    """w_keep appears in both snapshots; w_drop only in snap1; w_new only in snap2."""
+    for wallet in (w_keep, w_drop, w_new):
+        await traders_repo.upsert(db_conn, wallet, now_ts=NOW)
+    # snap1 (older) — has w_keep + w_drop
+    snap1 = await lb_repo.create_snapshot(
+        db_conn, period="day", snapshot_ts=NOW - 86400 * 5,
+        ingest_duration_ms=1, entries_count=2, hit_pagination_cap=False,
+    )
+    await lb_repo.add_entry(
+        db_conn, snapshot_id=snap1, rank=1, wallet=w_keep,
+        pnl_usd=Decimal("100"), volume_usd=Decimal("50"), trade_count=None,
+    )
+    await lb_repo.add_entry(
+        db_conn, snapshot_id=snap1, rank=2, wallet=w_drop,
+        pnl_usd=Decimal("50"), volume_usd=Decimal("25"), trade_count=None,
+    )
+    # snap2 (today) — has w_keep + w_new
+    snap2 = await lb_repo.create_snapshot(
+        db_conn, period="day", snapshot_ts=NOW,
+        ingest_duration_ms=1, entries_count=2, hit_pagination_cap=False,
+    )
+    await lb_repo.add_entry(
+        db_conn, snapshot_id=snap2, rank=1, wallet=w_keep,
+        pnl_usd=Decimal("60"), volume_usd=Decimal("40"), trade_count=None,
+    )
+    await lb_repo.add_entry(
+        db_conn, snapshot_id=snap2, rank=2, wallet=w_new,
+        pnl_usd=Decimal("60"), volume_usd=Decimal("40"), trade_count=None,
+    )
+    return snap1, snap2
+
+
+async def test_shortlist_prefers_persisted_wallets(db_conn):
+    w_keep = "0x" + "1" * 40
+    w_drop = "0x" + "2" * 40
+    w_new = "0x" + "3" * 40
+    await _seed_two_snapshots(db_conn, w_keep, w_drop, w_new)
+    # Seed a winning trade for each so they pass min_realized_pnl / min_hit_rate
+    for wallet in (w_keep, w_new):  # w_drop not in latest snapshot, won't be analyzed
+        await _seed(db_conn, wallet, side="BUY_YES", profitable=True)
+    await db_conn.commit()
+
+    entries = await shortlist(db_conn, top=2, min_hit_rate=Decimal("0.5"))
+    # Both candidates qualify; w_keep persisted in 2 snapshots, w_new in 1
+    assert len(entries) == 2
+    assert entries[0].wallet == w_keep
+    assert entries[0].persisted_days == 2
+    assert entries[0].suggested_weight == Decimal("1.0")
+    assert entries[1].wallet == w_new
+    assert entries[1].persisted_days == 1
+    assert entries[1].suggested_weight == Decimal("0.7")
+
+
+async def test_shortlist_rejects_low_hit_rate(db_conn):
+    wallet = "0x" + "9" * 40
+    await traders_repo.upsert(db_conn, wallet, now_ts=NOW)
+    snap_id = await lb_repo.create_snapshot(
+        db_conn, period="day", snapshot_ts=NOW,
+        ingest_duration_ms=1, entries_count=1, hit_pagination_cap=False,
+    )
+    await lb_repo.add_entry(
+        db_conn, snapshot_id=snap_id, rank=1, wallet=wallet,
+        pnl_usd=Decimal("100"), volume_usd=Decimal("50"), trade_count=None,
+    )
+    await _seed(db_conn, wallet, side="BUY_NO", profitable=False)  # YES wins, NO loses → hit_rate 0
+    await db_conn.commit()
+    entries = await shortlist(db_conn, top=2, min_hit_rate=Decimal("0.5"))
+    assert entries == []
+
+
+def test_render_copy_sources_yaml_shape():
+    from polymarket_alpha.helpers.strategies import ShortlistEntry
+
+    e = ShortlistEntry(
+        rank=4,
+        wallet="0x1c01e123daca82058b51e61f679c25cfb4ddaa0f",
+        realized_pnl=Decimal("9681"),
+        hit_rate=Decimal("0.7650"),
+        leaderboard_pnl=Decimal("5881"),
+        strategy=("MIXED", "EDGE_SEEKER", "BEAR", "SCALPER"),
+        persisted_days=2,
+        suggested_weight=Decimal("1.0"),
+        justification="strong",
+    )
+    out = render_copy_sources_yaml([e])
+    assert "sources:" in out
+    assert "shadow_1_bear" in out
+    assert '"0x1c01e123daca82058b51e61f679c25cfb4ddaa0f"' in out
+    assert "weight: 1.0" in out
+    assert "per_trade_size_cap_usd: 3.0" in out
+    assert "classes_eligible:" in out
+    assert "intraday_15m" in out

@@ -1,0 +1,18 @@
+# Oneshot: snapshot the DB + activities and rclone-copy to Drive.
+# Paired with polymarket-alpha-backup.timer (daily). Install both, then:
+#   sudo systemctl enable --now polymarket-alpha-backup.timer
+[Unit]
+Description=polymarket_alpha daily backup to Google Drive
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=CHANGE_ME
+WorkingDirectory=/opt/polymarket_alpha
+Environment=POLYMARKET_ALPHA_DB=%h/.polymarket_alpha/data.db
+ExecStart=/opt/polymarket_alpha/.venv/bin/python -m polymarket_alpha db backup \
+  --db-path %h/.polymarket_alpha/data.db --out-dir %h/.polymarket_alpha/backups
+# Requires a configured rclone remote named 'gdrive' (rclone config):
+ExecStartPost=/usr/bin/rclone copy %h/.polymarket_alpha/backups \
+  "gdrive:poly wallet data strategy" \
+  --include "poly-wallet-data-strategy-*.gz" --max-age 25h

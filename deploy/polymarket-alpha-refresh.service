@@ -1,0 +1,17 @@
+# Oneshot: refresh leaderboard + activity + markets, regenerate sources.yaml.
+# Paired with polymarket-alpha-refresh.timer (every 4h).
+[Unit]
+Description=polymarket_alpha 4-hour refresh (leaderboard -> activity -> resolver -> shortlist)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=CHANGE_ME
+WorkingDirectory=/opt/polymarket_alpha
+Environment=POLYMARKET_ALPHA_HOME=/opt/polymarket_alpha
+Environment=POLYMARKET_ALPHA_DB=%h/.polymarket_alpha/data.db
+Environment=POLYMARKET_ALPHA_OUTPUT=%h/.polymarket_alpha/sources.yaml
+Environment=POLYMARKET_ALPHA_LOG_DIR=%h/.polymarket_alpha/logs
+Environment=POLYMARKET_ALPHA_PYTHON=/opt/polymarket_alpha/.venv/bin/python
+Environment=POLYMARKET_ALPHA_TOP=2
+ExecStart=/opt/polymarket_alpha/scripts/4h-refresh.sh

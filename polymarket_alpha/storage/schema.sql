@@ -1,0 +1,8 @@
+-- Canonical schema reference.
+--
+-- The source of truth is the versioned migration set in `migrations/`.
+-- `db init` / `db migrate` apply every pending `NNN_*.sql` in order and
+-- record the version in the `schema_version` table.
+--
+-- Current latest schema == migrations/001_initial.sql
+-- Do not hand-edit a live DB; add a new migrations/NNN_*.sql instead.

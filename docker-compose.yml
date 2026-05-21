@@ -1,0 +1,37 @@
+# Two services off one image, sharing a persistent named volume for the DB.
+#   worker  - runs all five ingest workers continuously
+#   backup  - daily `db backup` + rclone copy to the Drive folder
+#
+# One-time host setup before `docker compose up -d`:
+#   rclone config            # create a remote named 'gdrive' for the Drive acct
+#   (its config lands in ~/.config/rclone/rclone.conf, mounted read-only below)
+
+services:
+  worker:
+    build: .
+    command: ["worker", "all"]
+    environment:
+      POLYMARKET_ALPHA_DB: /data/data.db
+    volumes:
+      - poly_data:/data
+    restart: unless-stopped
+    stop_grace_period: 30s          # SIGTERM -> graceful worker shutdown
+
+  backup:
+    build: .
+    entrypoint: ["/app/scripts/backup-loop.sh"]
+    environment:
+      POLYMARKET_ALPHA_DB: /data/data.db
+      BACKUP_DIR: /backups
+      BACKUP_INTERVAL: "86400"
+      RCLONE_REMOTE: "gdrive:poly wallet data strategy"
+      BACKUP_RETENTION_DAYS: "14"
+    volumes:
+      - poly_data:/data               # WAL needs rw even for the reader/VACUUM
+      - poly_backups:/backups
+      - ${HOME}/.config/rclone:/home/app/.config/rclone:ro
+    restart: unless-stopped
+
+volumes:
+  poly_data:                        # the SQLite DB — survives container rebuilds
+  poly_backups:                     # local backup retention (14d)

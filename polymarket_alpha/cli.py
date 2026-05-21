@@ -114,6 +114,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     worker.add_argument("--interval", type=int, default=None, help="loop seconds")
     worker.add_argument("--once", action="store_true", help="single cycle then exit")
+    worker.add_argument(
+        "--max-trades-per-wallet",
+        type=int,
+        default=None,
+        help="bound activity backfill per wallet (only used by `worker activity`)",
+    )
     _add_db_path(worker)
 
     w = sub.add_parser("wallet", help="query stored activity for a wallet")
@@ -421,7 +427,12 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
         mod_path, default_interval = _WORKERS[name]
         mod = importlib.import_module(mod_path)
         interval = args.interval or default_interval
-        await mod.run(conn, shutdown, interval=interval, once=args.once)
+        kwargs: dict = {"interval": interval, "once": args.once}
+        # Only the activity poller accepts max_items_per_wallet — pass it
+        # conditionally so other workers don't get an unknown-kwarg error.
+        if name == "activity" and args.max_trades_per_wallet is not None:
+            kwargs["max_items_per_wallet"] = args.max_trades_per_wallet
+        await mod.run(conn, shutdown, **kwargs)
 
     try:
         if args.name == "all" and args.once:

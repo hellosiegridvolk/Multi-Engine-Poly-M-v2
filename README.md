@@ -159,6 +159,21 @@ For a host crontab alternative, the equivalent line is:
 0 */4 * * *  /opt/polymarket_alpha/scripts/4h-refresh.sh
 ```
 
+### Cross-machine sync (optional)
+
+If you run this tool on one machine and a separate bot on another, the
+`scripts/sync-sources.sh` wrapper copies `sources.yaml` to a remote host
+via ssh/scp (only when the file actually changed — checks diff first) and
+optionally runs a remote restart command:
+
+```bash
+REMOTE_USER=nicola \
+REMOTE_HOST=bot-mac.local \
+REMOTE_PATH="/Users/nicola/Downloads/Assited trading Bot/config/copy_sources.yaml" \
+REMOTE_RESTART_CMD="cd '/Users/nicola/Downloads/Assited trading Bot' && docker compose build copy_watcher && docker compose up -d copy_watcher" \
+  ./scripts/sync-sources.sh
+```
+
 **Persistence is the only hard requirement** — the DB must live on a
 durable volume/path. **Monitoring**: read the tool's own signals
 (`db stats`, `ingest_runs.errors_count`, container/journal logs), not the

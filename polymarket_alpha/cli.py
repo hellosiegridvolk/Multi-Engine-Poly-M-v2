@@ -62,6 +62,17 @@ def _add_audit_args(p: argparse.ArgumentParser) -> None:
         help="skip the leaderboard and dossier a single wallet address",
     )
     p.add_argument(
+        "--from-db",
+        action="store_true",
+        help="build dossiers from stored SQLite data instead of the live API "
+        "(reproducible/offline; reads the latest leaderboard snapshot)",
+    )
+    p.add_argument(
+        "--db-path",
+        default=None,
+        help="SQLite path for --from-db (default: $POLYMARKET_ALPHA_DB)",
+    )
+    p.add_argument(
         "-v",
         "--verbose",
         action="count",
@@ -191,6 +202,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     bt.add_argument("--format", choices=["human", "json"], default="human")
     _add_db_path(bt)
 
+    mt = sub.add_parser(
+        "metrics",
+        help="emit Prometheus text-exposition metrics (node_exporter textfile)",
+    )
+    mt.add_argument("--output", default="-", help="path or '-' for stdout")
+    _add_db_path(mt)
+
     rf = sub.add_parser(
         "refresh",
         help="4h cycle: leaderboard + activity + resolver + shortlist",
@@ -245,6 +263,35 @@ def _decimal_default(obj: Any) -> str:
 def _dossier_to_dict(d: StrategyDossier) -> dict:
     out = dataclasses.asdict(d)
     return out
+
+
+async def _cmd_audit_from_db(args: argparse.Namespace) -> int:
+    """`audit --from-db`: dossiers from stored SQLite data (reproducible)."""
+    configure_logging(args.verbose)
+    from polymarket_alpha import storage
+    from polymarket_alpha.helpers.strategies import analyze
+
+    conn = await storage.connect(storage.resolve_db_path(args.db_path))
+    try:
+        period = args.period if args.period in ("day", "week", "month") else "day"
+        report = await analyze(conn, period=period, top=args.limit)
+        dossiers = report.dossiers
+    finally:
+        await conn.close()
+
+    if not dossiers:
+        log.error("no stored data — run `worker leaderboard`/`activity` first")
+        return 1
+    if args.format == "json":
+        payload = json.dumps(
+            [_dossier_to_dict(d) for d in dossiers],
+            default=_decimal_default,
+            indent=2,
+        )
+    else:
+        payload = _render_human(dossiers)
+    _emit(payload, args.output)
+    return 0
 
 
 def _render_human(dossiers: list[StrategyDossier]) -> str:
@@ -375,7 +422,7 @@ def run_audit(args: argparse.Namespace) -> int:
 
 _SUBCOMMANDS = {
     "audit", "db", "worker", "wallet", "leaderboard", "table", "export",
-    "strategies", "shortlist", "refresh", "backtest",
+    "strategies", "shortlist", "refresh", "backtest", "metrics",
 }
 
 
@@ -643,6 +690,29 @@ async def _cmd_refresh(args: argparse.Namespace) -> int:
     return 1 if result.errors and not result.shortlist_entries else 0
 
 
+async def _cmd_metrics(args: argparse.Namespace) -> int:
+    from polymarket_alpha import storage
+    from polymarket_alpha.helpers.metrics import render_prometheus
+
+    conn = await storage.connect(storage.resolve_db_path(args.db_path))
+    try:
+        text = await render_prometheus(conn)
+    finally:
+        await conn.close()
+    if args.output == "-":
+        sys.stdout.write(text)
+    else:
+        # Atomic write so node_exporter never scrapes a half-written file.
+        from pathlib import Path
+
+        out = Path(args.output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_suffix(out.suffix + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(out)
+    return 0
+
+
 async def _cmd_backtest(args: argparse.Namespace) -> int:
     from datetime import datetime, timezone
 
@@ -743,6 +813,8 @@ def main() -> None:
         if args.command is None:
             build_arg_parser().print_help()
             sys.exit(0)
+        if getattr(args, "from_db", False):
+            sys.exit(asyncio.run(_cmd_audit_from_db(args)))
         sys.exit(run_audit(args))
 
     configure_logging(getattr(args, "verbose", 0))
@@ -757,6 +829,7 @@ def main() -> None:
         "shortlist": _cmd_shortlist,
         "refresh": _cmd_refresh,
         "backtest": _cmd_backtest,
+        "metrics": _cmd_metrics,
     }
     sys.exit(asyncio.run(handlers[args.command](args)))
 

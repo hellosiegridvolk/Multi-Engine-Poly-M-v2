@@ -154,6 +154,65 @@ async def test_refresh_diff_detects_changes(db_conn, tmp_path, monkeypatch):
     assert any(f"ADDED:   {wallet.lower()}" in c for c in result.changes_vs_previous)
 
 
+async def test_refresh_notify_and_html_outputs(db_conn, tmp_path, monkeypatch):
+    from polymarket_alpha import refresh as refresh_mod
+    from polymarket_alpha.workers import activity_poller, leaderboard_poller, market_resolver
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(leaderboard_poller, "run", _noop)
+    monkeypatch.setattr(activity_poller, "run", _noop)
+    monkeypatch.setattr(market_resolver, "run", _noop)
+
+    wallet = "0x" + "d" * 40
+    await _seed_winner(db_conn, wallet)
+
+    notify = tmp_path / "changed.txt"
+    html = tmp_path / "dash.html"
+    out = tmp_path / "sources.yaml"
+    result = await refresh_mod.run_refresh(
+        db_conn, top=2, output_path=out, diff_against=out,
+        notify_path=notify, html_path=html,
+    )
+    # First run: wallet is ADDED → notification fires
+    assert notify.exists()
+    assert "shortlist changed" in notify.read_text()
+    assert wallet in notify.read_text()
+    # HTML dashboard written and self-contained
+    assert html.exists()
+    text = html.read_text()
+    assert "<!doctype html>" in text
+    assert wallet in text
+    assert "copy-shadow shortlist" in text
+    assert len(result.shortlist_entries) == 1
+
+
+async def test_refresh_no_notify_when_unchanged(db_conn, tmp_path, monkeypatch):
+    from polymarket_alpha import refresh as refresh_mod
+    from polymarket_alpha.workers import activity_poller, leaderboard_poller, market_resolver
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(leaderboard_poller, "run", _noop)
+    monkeypatch.setattr(activity_poller, "run", _noop)
+    monkeypatch.setattr(market_resolver, "run", _noop)
+
+    wallet = "0x" + "e" * 40
+    await _seed_winner(db_conn, wallet)
+    out = tmp_path / "sources.yaml"
+    notify = tmp_path / "changed.txt"
+
+    # First run writes sources.yaml
+    await refresh_mod.run_refresh(db_conn, top=2, output_path=out, diff_against=out)
+    # Second run: same wallet → UNCHANGED → notify must NOT be written
+    await refresh_mod.run_refresh(
+        db_conn, top=2, output_path=out, diff_against=out, notify_path=notify,
+    )
+    assert not notify.exists()
+
+
 def test_read_previous_yaml_handles_missing(tmp_path):
     assert _read_previous_yaml(tmp_path / "absent.yaml") == set()
     assert _read_previous_yaml(None) == set()

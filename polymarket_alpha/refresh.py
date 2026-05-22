@@ -8,9 +8,11 @@ failure so a transient outage doesn't lose the whole cycle.
 from __future__ import annotations
 
 import asyncio
+import html as _html
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -73,6 +75,49 @@ async def _run_step(
         return False
 
 
+def _render_dashboard_html(result: "RefreshResult") -> str:
+    """Self-contained HTML summary of a refresh cycle (no external assets)."""
+    gen = datetime.fromtimestamp(result.finished_ts, tz=timezone.utc).isoformat()
+    rows = []
+    for e in result.shortlist_entries:
+        hit = f"{e.hit_rate}" if e.hit_rate is not None else "-"
+        rows.append(
+            "<tr>"
+            f"<td>{e.rank}</td>"
+            f"<td class=mono>{_html.escape(e.wallet)}</td>"
+            f"<td>{'/'.join(e.strategy)}</td>"
+            f"<td class=num>{e.realized_pnl}</td>"
+            f"<td class=num>{hit}</td>"
+            f"<td class=num>{e.persisted_days}</td>"
+            f"<td class=num>{e.suggested_weight}</td>"
+            "</tr>"
+        )
+    changes = "<br>".join(_html.escape(c) for c in result.changes_vs_previous) or "—"
+    errs = "<br>".join(_html.escape(e) for e in result.errors) or "none"
+    return f"""<!doctype html>
+<html><head><meta charset=utf-8><title>polymarket_alpha refresh</title>
+<style>
+body{{font-family:ui-monospace,Menlo,monospace;background:#0d1117;color:#c9d1d9;margin:2rem}}
+h1{{font-size:1.1rem}} table{{border-collapse:collapse;width:100%;margin:1rem 0}}
+th,td{{border:1px solid #30363d;padding:.35rem .6rem;text-align:left}}
+th{{background:#161b22}} .num{{text-align:right}} .mono{{font-size:.85rem}}
+.meta{{color:#8b949e;font-size:.85rem}}
+</style></head><body>
+<h1>polymarket_alpha — copy-shadow shortlist</h1>
+<p class=meta>generated {gen} UTC &middot; cycle {result.finished_ts - result.started_ts}s
+&middot; leaderboard={'ok' if result.leaderboard_ok else 'FAIL'}
+activity={'ok' if result.activity_ok else 'FAIL'}
+resolver={'ok' if result.resolver_ok else 'FAIL'}</p>
+<table><tr><th>rank</th><th>wallet</th><th>strategy</th><th>realized PnL</th>
+<th>hit</th><th>snapshots</th><th>weight</th></tr>
+{''.join(rows) or '<tr><td colspan=7>no shortlist entries</td></tr>'}
+</table>
+<p class=meta><b>changes vs previous:</b><br>{changes}</p>
+<p class=meta><b>errors:</b> {errs}</p>
+</body></html>
+"""
+
+
 async def run_refresh(
     conn: aiosqlite.Connection,
     *,
@@ -81,6 +126,8 @@ async def run_refresh(
     output_path: Path | None = None,
     diff_against: Path | None = None,
     max_items_per_wallet: int = 300,
+    notify_path: Path | None = None,
+    html_path: Path | None = None,
 ) -> RefreshResult:
     """Run one full refresh cycle. Returns a structured result; never raises."""
     started = int(time.time())
@@ -140,7 +187,7 @@ async def run_refresh(
         tmp.replace(output_path)
         log.info("refresh: wrote %d entries to %s", len(entries), output_path)
 
-    return RefreshResult(
+    result = RefreshResult(
         started_ts=started,
         finished_ts=int(time.time()),
         leaderboard_ok=lb_ok,
@@ -150,3 +197,24 @@ async def run_refresh(
         changes_vs_previous=changes,
         errors=errors,
     )
+
+    # Change notification: write a marker file only when picks actually
+    # changed (ADDED/REMOVED) — a cron/hook can email/Slack on its presence.
+    if notify_path is not None:
+        actionable = [c for c in changes if c.startswith(("ADDED", "REMOVED"))]
+        if actionable:
+            notify_path.parent.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).isoformat()
+            notify_path.write_text(
+                f"{stamp}\nshortlist changed:\n" + "\n".join(actionable) + "\n",
+                encoding="utf-8",
+            )
+            log.info("refresh: change notification written to %s", notify_path)
+
+    # Static HTML dashboard.
+    if html_path is not None:
+        html_path.parent.mkdir(parents=True, exist_ok=True)
+        html_path.write_text(_render_dashboard_html(result), encoding="utf-8")
+        log.info("refresh: dashboard written to %s", html_path)
+
+    return result

@@ -73,13 +73,21 @@ async def run(
     interval: int,
     once: bool,
     max_items_per_wallet: int | None = 2000,
+    extra_wallets: list[str] | None = None,
 ) -> None:
     http = build_client()
     client = ActivityClient(http)
+    pinned = {w.strip().lower() for w in (extra_wallets or []) if w.strip()}
 
     async def cycle(_run_id: int) -> tuple[int, int]:
         now_ts = int(time.time())
         wallets = await _watchlist(conn, now_ts)
+        if pinned:
+            # Pinned wallets need a traders row to satisfy the FK on activities.
+            for w in pinned:
+                await traders_repo.upsert(conn, w, now_ts=now_ts)
+            await conn.commit()
+            wallets |= pinned
         seen = written = 0
         for wallet in sorted(wallets):
             if shutdown.is_set():

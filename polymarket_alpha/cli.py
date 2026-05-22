@@ -120,6 +120,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="bound activity backfill per wallet (only used by `worker activity`)",
     )
+    worker.add_argument(
+        "--watch-wallets",
+        default=None,
+        help="comma-separated extra wallets to always poll (only `worker activity`)",
+    )
     _add_db_path(worker)
 
     w = sub.add_parser("wallet", help="query stored activity for a wallet")
@@ -170,7 +175,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="reject wallets below this realized hit rate (default: 0.55)",
     )
     sl.add_argument("--output", default="-", help="path or '-' for stdout")
+    sl.add_argument(
+        "--diversify",
+        action="store_true",
+        help="spread picks across BULL/BEAR/NEUTRAL instead of pure top-N",
+    )
     _add_db_path(sl)
+
+    bt = sub.add_parser(
+        "backtest",
+        help="did a past shortlist beat the field on forward PnL?",
+    )
+    bt.add_argument("--top", type=int, default=2)
+    bt.add_argument("--as-of", default=None, help="ISO8601 pick date (default: oldest snapshot)")
+    bt.add_argument("--format", choices=["human", "json"], default="human")
+    _add_db_path(bt)
 
     rf = sub.add_parser(
         "refresh",
@@ -188,6 +207,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=300,
         help="bound activity backfill per wallet (default: 300)",
+    )
+    rf.add_argument(
+        "--notify-on-change",
+        default=None,
+        help="write a marker file here when the shortlist changes",
+    )
+    rf.add_argument(
+        "--html",
+        default=None,
+        help="write a self-contained HTML dashboard here",
     )
     _add_db_path(rf)
 
@@ -346,7 +375,7 @@ def run_audit(args: argparse.Namespace) -> int:
 
 _SUBCOMMANDS = {
     "audit", "db", "worker", "wallet", "leaderboard", "table", "export",
-    "strategies", "shortlist", "refresh",
+    "strategies", "shortlist", "refresh", "backtest",
 }
 
 
@@ -428,10 +457,15 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
         mod = importlib.import_module(mod_path)
         interval = args.interval or default_interval
         kwargs: dict = {"interval": interval, "once": args.once}
-        # Only the activity poller accepts max_items_per_wallet — pass it
-        # conditionally so other workers don't get an unknown-kwarg error.
-        if name == "activity" and args.max_trades_per_wallet is not None:
-            kwargs["max_items_per_wallet"] = args.max_trades_per_wallet
+        # Only the activity poller accepts these — pass conditionally so other
+        # workers don't get an unknown-kwarg error.
+        if name == "activity":
+            if args.max_trades_per_wallet is not None:
+                kwargs["max_items_per_wallet"] = args.max_trades_per_wallet
+            if args.watch_wallets:
+                kwargs["extra_wallets"] = [
+                    w.strip() for w in args.watch_wallets.split(",") if w.strip()
+                ]
         await mod.run(conn, shutdown, **kwargs)
 
     try:
@@ -587,6 +621,8 @@ async def _cmd_refresh(args: argparse.Namespace) -> int:
             output_path=out_path,
             diff_against=out_path,
             max_items_per_wallet=args.max_trades_per_wallet,
+            notify_path=Path(args.notify_on_change) if args.notify_on_change else None,
+            html_path=Path(args.html) if args.html else None,
         )
     finally:
         await conn.close()
@@ -607,6 +643,35 @@ async def _cmd_refresh(args: argparse.Namespace) -> int:
     return 1 if result.errors and not result.shortlist_entries else 0
 
 
+async def _cmd_backtest(args: argparse.Namespace) -> int:
+    from datetime import datetime, timezone
+
+    from polymarket_alpha import storage
+    from polymarket_alpha.helpers.backtest import (
+        backtest,
+        backtest_to_dict,
+        render_backtest_human,
+    )
+
+    conn = await storage.connect(storage.resolve_db_path(args.db_path))
+    try:
+        as_of_ts = None
+        if args.as_of:
+            as_of_ts = int(
+                datetime.fromisoformat(args.as_of.replace("Z", "+00:00"))
+                .astimezone(timezone.utc)
+                .timestamp()
+            )
+        report = await backtest(conn, top=args.top, as_of_ts=as_of_ts)
+        if args.format == "json":
+            print(json.dumps(backtest_to_dict(report), indent=2))
+        else:
+            print(render_backtest_human(report))
+    finally:
+        await conn.close()
+    return 0
+
+
 async def _cmd_shortlist(args: argparse.Namespace) -> int:
     from decimal import Decimal
 
@@ -619,7 +684,10 @@ async def _cmd_shortlist(args: argparse.Namespace) -> int:
     conn = await storage.connect(storage.resolve_db_path(args.db_path))
     try:
         entries = await shortlist(
-            conn, top=args.top, min_hit_rate=Decimal(args.min_hit_rate)
+            conn,
+            top=args.top,
+            min_hit_rate=Decimal(args.min_hit_rate),
+            diversify=args.diversify,
         )
         yaml_text = render_copy_sources_yaml(entries)
         if args.output == "-":
@@ -688,6 +756,7 @@ def main() -> None:
         "strategies": _cmd_strategies,
         "shortlist": _cmd_shortlist,
         "refresh": _cmd_refresh,
+        "backtest": _cmd_backtest,
     }
     sys.exit(asyncio.run(handlers[args.command](args)))
 

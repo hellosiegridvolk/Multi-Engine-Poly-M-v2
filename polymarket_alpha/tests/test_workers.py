@@ -179,6 +179,32 @@ async def test_resolver_resolves_by_condition_id(db_conn):
     assert (await tok.fetchone())[0] == 2
 
 
+@respx.mock
+async def test_activity_poller_extra_wallets(db_conn):
+    """A pinned extra wallet is polled even when not on the leaderboard."""
+    now = int(time.time())
+    pinned = "0x" + "ab" * 20
+    # No leaderboard snapshot at all → watchlist would be empty without extra_wallets.
+    rec = {
+        "type": "TRADE", "proxyWallet": pinned, "conditionId": "0xc",
+        "asset": "111", "side": "BUY", "outcomeIndex": 0,
+        "size": "10", "usdcSize": "5", "price": "0.5",
+        "timestamp": now - 3600, "transactionHash": "0xtx",
+    }
+    respx.get(f"{DATA_API}/activity").mock(
+        return_value=httpx.Response(200, json=[rec])
+    )
+    shutdown = asyncio.Event()
+    await activity_poller.run(
+        db_conn, shutdown, interval=1, once=True,
+        max_items_per_wallet=10, extra_wallets=[pinned.upper()],
+    )
+    cur = await db_conn.execute(
+        "SELECT COUNT(*) FROM activities WHERE wallet = ?", (pinned,)
+    )
+    assert (await cur.fetchone())[0] == 1
+
+
 async def test_reconciler_links_ws_to_rest(db_conn):
     now = int(time.time())
     wallet = "0xrecon"

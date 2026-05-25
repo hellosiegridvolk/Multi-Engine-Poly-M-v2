@@ -91,9 +91,17 @@ python -m polymarket_alpha strategies --period week --top 20    # categorize wal
 python -m polymarket_alpha shortlist --top 2 --output sources.yaml  # weekly re-eval
 #   emit a copy_sources.yaml drop-in: top-N wallets filtered by realized PnL +
 #   hit rate, weighted by cross-snapshot persistence (durable > one-day spike)
-python -m polymarket_alpha refresh --output ~/.polymarket_alpha/sources.yaml
+python -m polymarket_alpha refresh --output ~/.polymarket_alpha/sources.yaml \
+  --notify-on-change ~/.polymarket_alpha/changed.txt --html ~/.polymarket_alpha/dash.html
 #   full 4h cycle: leaderboard -> activity -> resolver -> shortlist, with
-#   atomic yaml write + diff vs. previous run (ADDED/REMOVED/UNCHANGED lines)
+#   atomic yaml write + diff vs. previous run (ADDED/REMOVED/UNCHANGED lines);
+#   optional change-marker file + self-contained HTML dashboard
+python -m polymarket_alpha backtest --top 2     # did a past shortlist beat the field?
+#   picks a shortlist as of a past snapshot, measures forward realized PnL
+python -m polymarket_alpha metrics --output node_exporter/polymarket_alpha.prom
+#   Prometheus text-exposition metrics (table rows, per-worker run/error counts)
+python -m polymarket_alpha audit --from-db --period day --limit 5
+#   v1 dossiers built from stored SQLite data (reproducible/offline)
 
 # db lifecycle: db init | migrate | vacuum | stats | backup
 #   (--db-path / $POLYMARKET_ALPHA_DB)

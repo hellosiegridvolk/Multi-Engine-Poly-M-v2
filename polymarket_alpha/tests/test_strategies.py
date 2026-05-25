@@ -69,6 +69,71 @@ async def _seed(db_conn, wallet: str, *, side: str, profitable: bool):
     )
 
 
+async def _seed_profitable(db_conn, wallet: str, *, direction: str):
+    """Seed a profitable wallet of a given direction.
+
+    direction='BULL'  -> BUY YES on a YES-resolved market (wins)
+    direction='BEAR'  -> BUY NO  on a NO-resolved market  (wins)
+    """
+    await traders_repo.upsert(db_conn, wallet, now_ts=NOW)
+    cid = "0xc" + wallet[-4:]
+    resolution = "YES" if direction == "BULL" else "NO"
+    await markets_repo.upsert_market(
+        db_conn, condition_id=cid, slug="s", question="q", end_date_ts=NOW,
+        resolved=True, resolution=resolution, category_tags=["crypto"],
+        is_crypto=True, resolved_at_ts=NOW, metadata_fetched_ts=NOW,
+    )
+    await markets_repo.upsert_token(
+        db_conn, token_id="y" + wallet[-4:], condition_id=cid,
+        outcome="YES", outcome_index=0,
+    )
+    await markets_repo.upsert_token(
+        db_conn, token_id="n" + wallet[-4:], condition_id=cid,
+        outcome="NO", outcome_index=1,
+    )
+    outcome = "YES" if direction == "BULL" else "NO"
+    await insert_or_ignore(
+        db_conn,
+        ActivityRow(
+            wallet=wallet, activity_type="TRADE", condition_id=cid,
+            token_id=("y" if outcome == "YES" else "n") + wallet[-4:],
+            side="BUY", outcome=outcome,
+            shares=Decimal("100"), usdc=Decimal("40"), price=Decimal("0.40"),
+            timestamp=NOW, tx_hash="0xt" + wallet[-4:], source="REST",
+        ),
+        ingested_ts=NOW,
+    )
+
+
+async def test_shortlist_diversify_spreads_direction(db_conn):
+    bull1 = "0x" + "1" * 39 + "a"
+    bull2 = "0x" + "2" * 39 + "b"
+    bear1 = "0x" + "3" * 39 + "c"
+    await _seed_profitable(db_conn, bull1, direction="BULL")
+    await _seed_profitable(db_conn, bull2, direction="BULL")
+    await _seed_profitable(db_conn, bear1, direction="BEAR")
+    snap = await lb_repo.create_snapshot(
+        db_conn, period="day", snapshot_ts=NOW,
+        ingest_duration_ms=1, entries_count=3, hit_pagination_cap=False,
+    )
+    for rank, w in enumerate((bull1, bull2, bear1), start=1):
+        await lb_repo.add_entry(
+            db_conn, snapshot_id=snap, rank=rank, wallet=w,
+            pnl_usd=Decimal("100"), volume_usd=Decimal("50"), trade_count=None,
+        )
+    await db_conn.commit()
+
+    plain = await shortlist(db_conn, top=2, min_hit_rate=Decimal("0.5"))
+    diverse = await shortlist(
+        db_conn, top=2, min_hit_rate=Decimal("0.5"), diversify=True
+    )
+    plain_dirs = {e.strategy[2] for e in plain}
+    diverse_dirs = {e.strategy[2] for e in diverse}
+    # Diversified pick must span both directions; plain need not.
+    assert diverse_dirs == {"BULL", "BEAR"}
+    assert len(diverse) == 2
+
+
 async def test_analyze_buckets_and_dossiers(db_conn):
     # one BULL winner, one BEAR loser, same leaderboard snapshot
     w_win = "0x" + "1" * 40

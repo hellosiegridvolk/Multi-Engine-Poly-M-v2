@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+launchd job: run `polymarket_alpha refresh` every 4 hours.
+Mac-native equivalent of deploy/polymarket-alpha-refresh.timer.
+
+Install:
+  1. Edit CHANGE_ME paths below to match your user and clone location.
+  2. cp deploy/com.polymarket-alpha.refresh.plist ~/Library/LaunchAgents/
+  3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.polymarket-alpha.refresh.plist
+  4. launchctl kickstart gui/$(id -u)/com.polymarket-alpha.refresh   # run once now
+
+Logs land in ~/.polymarket_alpha/logs/launchd.{out,err}.log.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.polymarket-alpha.refresh</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/CHANGE_ME/polymarket_alpha/scripts/4h-refresh.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>POLYMARKET_ALPHA_HOME</key>
+        <string>/Users/CHANGE_ME/polymarket_alpha</string>
+        <key>POLYMARKET_ALPHA_PYTHON</key>
+        <string>/Users/CHANGE_ME/polymarket_alpha/.venv/bin/python</string>
+        <key>POLYMARKET_ALPHA_DB</key>
+        <string>/Users/CHANGE_ME/.polymarket_alpha/data.db</string>
+        <key>POLYMARKET_ALPHA_OUTPUT</key>
+        <string>/Users/CHANGE_ME/.polymarket_alpha/sources.yaml</string>
+        <key>POLYMARKET_ALPHA_LOG_DIR</key>
+        <string>/Users/CHANGE_ME/.polymarket_alpha/logs</string>
+        <key>POLYMARKET_ALPHA_TOP</key>
+        <string>2</string>
+    </dict>
+
+    <!-- Every 4 hours. StartCalendarInterval with a list = explicit hours. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>17</integer></dict>
+        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>17</integer></dict>
+        <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>17</integer></dict>
+        <dict><key>Hour</key><integer>14</integer><key>Minute</key><integer>17</integer></dict>
+        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>17</integer></dict>
+        <dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>17</integer></dict>
+    </array>
+
+    <!-- Don't restart on failure — wait until the next scheduled hour. -->
+    <key>KeepAlive</key>
+    <false/>
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/CHANGE_ME/.polymarket_alpha/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/CHANGE_ME/.polymarket_alpha/logs/launchd.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

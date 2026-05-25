@@ -245,6 +245,8 @@ async def shortlist(
     period: str = "day",
     min_hit_rate: Decimal = Decimal("0.55"),
     min_realized_pnl: Decimal = Decimal("0"),
+    at_ts: int | None = None,
+    diversify: bool = False,
     cfg: DossierConfig | None = None,
 ) -> list[ShortlistEntry]:
     """Produce a shortlist of wallets to shadow-copy.
@@ -253,16 +255,27 @@ async def shortlist(
     at least 2 distinct day-snapshots (5+ days apart) when available.
     Weight is scaled by ``persisted_days`` so multi-snapshot wallets get
     weight=1.0 and single-snapshot wallets get weight=0.7.
+
+    ``at_ts`` restricts to the snapshot at-or-before that time (used by the
+    backtest). ``diversify`` greedily spreads picks across direction biases
+    (BULL/BEAR/NEUTRAL) instead of taking the top-N regardless of strategy.
     """
-    report = await analyze(conn, period=period, top=50, cfg=cfg)
+    report = await analyze(conn, period=period, top=50, at_ts=at_ts, cfg=cfg)
+    if at_ts is None:
+        snap_query = (
+            "SELECT snapshot_id FROM leaderboard_snapshots "
+            "WHERE period='day' ORDER BY snapshot_ts DESC"
+        )
+        snap_params: tuple = ()
+    else:
+        snap_query = (
+            "SELECT snapshot_id FROM leaderboard_snapshots "
+            "WHERE period='day' AND snapshot_ts <= ? ORDER BY snapshot_ts DESC"
+        )
+        snap_params = (at_ts,)
     snap_ids = [
         r["snapshot_id"]
-        for r in await (
-            await conn.execute(
-                "SELECT snapshot_id FROM leaderboard_snapshots "
-                "WHERE period='day' ORDER BY snapshot_ts DESC"
-            )
-        ).fetchall()
+        for r in await (await conn.execute(snap_query, snap_params)).fetchall()
     ]
 
     out: list[ShortlistEntry] = []
@@ -311,7 +324,26 @@ async def shortlist(
             -(e.hit_rate or Decimal(0)),
         )
     )
-    return out[:top]
+    if not diversify:
+        return out[:top]
+
+    # Diversify: greedily pick to spread direction_bias (BULL/BEAR/NEUTRAL),
+    # taking the best wallet of each unseen direction before doubling up.
+    picked: list[ShortlistEntry] = []
+    seen_dirs: set[str] = set()
+    for e in out:
+        if len(picked) >= top:
+            break
+        if e.strategy[2] not in seen_dirs:
+            picked.append(e)
+            seen_dirs.add(e.strategy[2])
+    # Fill remaining slots with the next-best regardless of direction.
+    for e in out:
+        if len(picked) >= top:
+            break
+        if e not in picked:
+            picked.append(e)
+    return picked[:top]
 
 
 def render_copy_sources_yaml(entries: list[ShortlistEntry]) -> str:
